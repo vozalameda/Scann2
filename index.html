@@ -212,12 +212,23 @@
       osc.connect(gain);
       gain.connect(audioCtx.destination);
       osc.start();
+
+      // iOS 15.x unlock: play a tiny silent buffer once (user-gesture path)
+      try {
+        const b = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+        const s = audioCtx.createBufferSource();
+        s.buffer = b;
+        s.connect(audioCtx.destination);
+        if (typeof s.start === 'function') s.start(0);
+        if (typeof s.stop === 'function') s.stop(0);
+      } catch (e) {}
     }
 
     function setGain(vol) {
       if (!audioCtx || !gain) return;
       const t = audioCtx.currentTime;
       gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(gain.gain.value, t);
       gain.gain.setTargetAtTime(vol, t, 0.01);
     }
 
@@ -242,8 +253,40 @@
 
     function startBuzz() {
       ensureAudio();
+      let didUnlock = false;
+
       // Resume in user gesture path (sync) for iOS/Chrome
-      try { if (audioCtx.state !== 'running') audioCtx.resume(); } catch (e) {}
+      try {
+        if (audioCtx && audioCtx.state !== 'running') {
+          const p = audioCtx.resume();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (e) {}
+
+      if (audioCtx && audioCtx.state !== 'running') {
+        // Immediate unlock attempt (same call stack)
+        try {
+          const b = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+          const s = audioCtx.createBufferSource();
+          s.buffer = b;
+          s.connect(audioCtx.destination);
+          if (typeof s.start === 'function') s.start(0);
+          if (typeof s.stop === 'function') s.stop(0);
+          didUnlock = true;
+        } catch (e) {}
+
+        try {
+          const p2 = audioCtx.resume();
+          if (p2 && typeof p2.catch === 'function') p2.catch(() => {});
+        } catch (e) {}
+      }
+
+      debug.textContent = "v5 audio (" + (audioCtx ? audioCtx.state : "none") + ",unlock:" + (didUnlock ? "y" : "n") + ")";
+
+      // Mandatory verification: only schedule beeps if running
+      if (!audioCtx || audioCtx.state !== 'running') {
+        return;
+      }
 
       beepIndex = 0;
       if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; }

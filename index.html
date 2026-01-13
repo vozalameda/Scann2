@@ -174,6 +174,8 @@
     let stopTimer = null;
 
     let audioCtx = null, osc = null, gain = null;
+    let audioUnlocked = false;
+    let audioStartSeq = 0;
     let alertOn = false;
 
     function hardVerify() {
@@ -212,16 +214,6 @@
       osc.connect(gain);
       gain.connect(audioCtx.destination);
       osc.start();
-
-      // iOS 15.x unlock: play a tiny silent buffer once (user-gesture path)
-      try {
-        const b = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
-        const s = audioCtx.createBufferSource();
-        s.buffer = b;
-        s.connect(audioCtx.destination);
-        if (typeof s.start === 'function') s.start(0);
-        if (typeof s.stop === 'function') s.stop(0);
-      } catch (e) {}
     }
 
     function setGain(vol) {
@@ -229,7 +221,7 @@
       const t = audioCtx.currentTime;
       gain.gain.cancelScheduledValues(t);
       gain.gain.setValueAtTime(gain.gain.value, t);
-      gain.gain.setTargetAtTime(vol, t, 0.01);
+      gain.gain.linearRampToValueAtTime(vol, t + 0.02);
     }
 
     // index_v7 beep pattern: ON 120 / OFF 90 / ON 120 / OFF 250 (repeat)
@@ -253,44 +245,57 @@
 
     function startBuzz() {
       ensureAudio();
-      let didUnlock = false;
 
-      // Resume in user gesture path (sync) for iOS/Chrome
-      try {
-        if (audioCtx && audioCtx.state !== 'running') {
-          const p = audioCtx.resume();
-          if (p && typeof p.catch === 'function') p.catch(() => {});
-        }
-      } catch (e) {}
+      // iOS 15 unlock + verified start: only schedule pattern when state === 'running'
+      const seq = ++audioStartSeq;
 
-      if (audioCtx && audioCtx.state !== 'running') {
-        // Immediate unlock attempt (same call stack)
+      const arm = () => {
+        if (seq !== audioStartSeq) return;
+        if (!alertOn) return;
+        if (!audioCtx || audioCtx.state !== 'running') return;
+
+        debug.textContent = "v5 audio (running)";
+        beepIndex = 0;
+        if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; }
+        scheduleBeep();
+      };
+
+      const unlockOnce = () => {
+        if (!audioCtx || audioUnlocked) return;
         try {
           const b = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
           const s = audioCtx.createBufferSource();
+          const g = audioCtx.createGain();
+          g.gain.value = 0.0;
           s.buffer = b;
-          s.connect(audioCtx.destination);
-          if (typeof s.start === 'function') s.start(0);
-          if (typeof s.stop === 'function') s.stop(0);
-          didUnlock = true;
+          s.connect(g);
+          g.connect(audioCtx.destination);
+          s.start(0);
+          s.stop(0);
+          audioUnlocked = true;
         } catch (e) {}
+      };
 
-        try {
-          const p2 = audioCtx.resume();
-          if (p2 && typeof p2.catch === 'function') p2.catch(() => {});
-        } catch (e) {}
+      try {
+        if (!audioCtx) return;
+
+        if (audioCtx.state !== 'running') {
+          unlockOnce();
+          const p = audioCtx.resume();
+          if (p && typeof p.then === 'function') {
+            p.then(() => arm()).catch(() => {
+              debug.textContent = "v5 audio (resume-fail)";
+            });
+          } else {
+            // If resume is sync (older impl), try arm immediately
+            arm();
+          }
+        } else {
+          arm();
+        }
+      } catch (e) {
+        debug.textContent = "v5 audio (error)";
       }
-
-      debug.textContent = "v5 audio (" + (audioCtx ? audioCtx.state : "none") + ",unlock:" + (didUnlock ? "y" : "n") + ")";
-
-      // Mandatory verification: only schedule beeps if running
-      if (!audioCtx || audioCtx.state !== 'running') {
-        return;
-      }
-
-      beepIndex = 0;
-      if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; }
-      scheduleBeep();
     }
 
     function stopBuzz() {

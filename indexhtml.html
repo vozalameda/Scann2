@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Scanner</title>
+  <!-- build: 2026-01-13-v5 -->
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #0b0b0f;
+      font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      overflow: hidden;
+      touch-action: none; /* important for iOS gesture handling */
+    }
+
+    .wrap {
+      height: 100%;
+      width: 100%;
+      display: grid;
+      place-items: center;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right)
+               env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+
+    /* Full-screen "hit" layer to guarantee touch target */
+    #hit {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+      touch-action: none;
+    }
+
+    .center {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      place-items: center;
+      gap: 18px;
+      text-align: center;
+      pointer-events: none; /* touches go to #hit */
+    }
+
+    .waves {
+      width: 240px; /* KEEP SIZE */
+      height: 240px; /* KEEP SIZE */
+      position: relative;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      filter: drop-shadow(0 0 18px rgba(120, 255, 170, 0.26));
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      background: rgba(120, 255, 170, 0.98);
+      box-shadow: 0 0 18px rgba(120, 255, 170, 0.9);
+    }
+
+    .ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 999px;
+      border: 5px solid rgba(120, 255, 170, 0.58);
+      box-shadow: 0 0 22px rgba(120, 255, 170, 0.20) inset;
+      transform: scale(0.2);
+      opacity: 0;
+      animation: ping 2.0s infinite;
+    }
+    /* ALERT COLOR SWITCH (only waves change color; background stays unchanged) */
+    body.alert .waves {
+      filter: drop-shadow(0 0 18px rgba(255, 0, 0, 0.35));
+    }
+    body.alert .dot {
+      background: rgba(255, 0, 0, 0.98) !important;
+      box-shadow: 0 0 18px rgba(255, 0, 0, 0.9) !important;
+    }
+    body.alert .ring {
+      border: 5px solid rgba(255, 0, 0, 0.78) !important;
+      box-shadow: 0 0 22px rgba(255, 0, 0, 0.25) inset !important;
+    }
+
+    .ring:nth-child(1) { animation-delay: 0.0s; }
+    .ring:nth-child(2) { animation-delay: 0.66s; }
+    .ring:nth-child(3) { animation-delay: 1.33s; }
+
+    @keyframes ping {
+      0%   { transform: scale(0.25); opacity: 0; }
+      12%  { opacity: 0.82; }
+      100% { transform: scale(1.05); opacity: 0; }
+    }
+
+    .label {
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.78);
+      font-size: 16px;
+    }
+
+    .flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0;
+      background: rgba(255, 0, 0, 0.0);
+      z-index: 1;
+    }
+    body.alert .flash { animation: flash 0.14s infinite alternate; }
+    @keyframes flash { from { opacity: 0.15; } to { opacity: 0.85; } }
+
+    /* Tiny debug indicator (updates on touch so you can SEE it's responding) */
+    .debug {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      z-index: 3;
+      pointer-events: none;
+    
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <button id="hit" aria-label="touch area"></button>
+
+    <div class="center">
+      <div class="waves" aria-hidden="true">
+        <div class="ring"></div>
+        <div class="ring"></div>
+        <div class="ring"></div>
+        <div class="dot"></div>
+      </div>
+      <div class="label" id="label">SCANNING...</div>
+    </div>
+
+    <div class="flash"></div>
+    <div class="debug" id="debug">v5 idle</div>
+  </div>
+
+  <script>
+    // iPhone SE (iOS 15.x) reliability strategy:
+    // - Prefer touchstart/touchend on a full-screen BUTTON (best compatibility).
+    // - Use non-passive listeners + preventDefault to ensure the touch is delivered.
+    // - Keep alert visible at least MIN_ALERT_MS even on quick taps.
+
+    const hit = document.getElementById('hit');
+    const debug = document.getElementById('debug');
+    const label = document.getElementById('label');
+
+    const WAVES_SIZE_PX = 240; // HARD CHECK: must remain 240
+    const MIN_ALERT_MS = 1500; // per request
+
+    let pressStartMs = 0;
+    let stopTimer = null;
+
+    let audioCtx = null, osc = null, gain = null;
+    let alertOn = false;
+
+    function hardVerify() {
+      // 1) Verify label text exactly
+      if (label.textContent !== "SCANNING...") {
+        label.textContent = "SCANNING..."; // force
+      }
+
+      // 2) Verify waves size (CSS)
+      const waves = document.querySelector('.waves');
+      const cs = window.getComputedStyle(waves);
+      const w = parseInt(cs.width, 10);
+      const h = parseInt(cs.height, 10);
+      if (w !== WAVES_SIZE_PX || h !== WAVES_SIZE_PX) {
+        // Force-correct via inline style (hard)
+        waves.style.width = WAVES_SIZE_PX + "px";
+        waves.style.height = WAVES_SIZE_PX + "px";
+      }
+
+      // 3) Verify touch capability basics
+      debug.textContent = "v5 ready (touch:" + (('ontouchstart' in window) ? "yes" : "no") + ")";
+    }
+
+    function ensureAudio() {
+      if (audioCtx) return;
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+      // iOS unlock helper: a silent buffer played once (common WebAudio unlock pattern)
+      try {
+        const buffer = audioCtx.createBuffer(1, 1, 22050);
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.start(0);
+      } catch (e) {}
+
+      osc = audioCtx.createOscillator();
+      gain = audioCtx.createGain();
+
+      osc.type = 'square';
+      osc.frequency.value = 750;
+
+      gain.gain.value = 0.0;
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+
+      try { osc.start(); } catch (e) {}
+    }
+
+    function setGain(vol) {
+      if (!audioCtx || !gain) return;
+      const t = audioCtx.currentTime;
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setTargetAtTime(vol, t, 0.005);
+    }
+
+    // index_v7 beep pattern: ON 120 / OFF 90 / ON 120 / OFF 250 (repeat)
+    const beepPattern = [
+      [120, 0.26],
+      [90,  0.00],
+      [120, 0.26],
+      [250, 0.00],
+    ];
+    let beepIndex = 0;
+    let beepTimer = null;
+
+    function scheduleBeep() {
+      if (!alertOn) return;
+
+      const step = beepPattern[beepIndex];
+      beepIndex = (beepIndex + 1) % beepPattern.length;
+
+      setGain(step[1]);
+      beepTimer = setTimeout(scheduleBeep, step[0]);
+    }
+
+    function startBuzz() {
+      ensureAudio();
+
+      // Resume immediately in the current user-gesture call stack.
+      try {
+        const p = audioCtx.resume();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {}).catch(() => {});
+        }
+      } catch (e) {}
+
+      // Kick an immediate ON step so user hears it even if resume completes slightly after.
+      beepIndex = 0;
+      if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; }
+
+      setGain(0.26);
+      beepTimer = setTimeout(() => {
+        if (!alertOn) return;
+        beepIndex = 1; // next step after the immediate ON
+        scheduleBeep();
+      }, 120);
+    }
+
+    function stopBuzz() {
+      if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; }
+      setGain(0.0);
+    }
+      setGain(0.0);
+    }
+
+    function startAlert(src) {
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+      if (alertOn) return;
+      alertOn = true;
+      pressStartMs = Date.now();
+      document.body.classList.add('alert');
+      debug.textContent = "v5 ALERT (" + src + ")";
+      startBuzz();
+    }
+
+    function stopAlert(src) {
+      if (!alertOn) return;
+      const elapsed = Date.now() - pressStartMs;
+      const remaining = Math.max(0, MIN_ALERT_MS - elapsed);
+      debug.textContent = "v5 release (" + src + ") +" + remaining + "ms";
+      if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+      stopTimer = setTimeout(() => {
+        alertOn = false;
+        document.body.classList.remove('alert');
+        stopBuzz();
+        debug.textContent = "v5 idle";
+        stopTimer = null;
+      }, remaining);
+    }
+
+    // Touch (primary for iOS 15)
+    hit.addEventListener('touchstart', (e) => { startAlert("touchstart"); e.preventDefault(); }, { passive: false });
+    hit.addEventListener('touchend',   (e) => { stopAlert("touchend");   e.preventDefault(); }, { passive: false });
+    hit.addEventListener('touchcancel',(e) => { stopAlert("touchcancel");e.preventDefault(); }, { passive: false });
+
+    // Mouse fallback (desktop)
+    hit.addEventListener('mousedown', (e) => { if (e.button === 0) startAlert("mousedown"); }, { passive: true });
+    window.addEventListener('mouseup', () => stopAlert("mouseup"), { passive: true });
+
+    // Pointer fallback (modern)
+    hit.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse' && e.button !== 0) return; startAlert("pointerdown"); }, { passive: true });
+    hit.addEventListener('pointerup', () => stopAlert("pointerup"), { passive: true });
+    hit.addEventListener('pointercancel', () => stopAlert("pointercancel"), { passive: true });
+
+    // Avoid "ghost click" toggling; button has no default action anyway
+    hit.addEventListener('click', (e) => { e.preventDefault(); }, { passive: false });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stopAlert("hidden");
+    });
+
+    // Run hard verification after layout
+    window.addEventListener('load', hardVerify, { passive: true });
+  </script>
+</body>
+</html>
